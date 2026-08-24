@@ -258,6 +258,45 @@ def _is_turn_running(agent) -> bool:
     return bool(getattr(agent, "_current_tool_count", None))
 
 
+def set_turn_active(active: bool) -> None:
+    """Publish this session's busy/idle state into its registry entry.
+
+    Written by the pre_llm_call hook (turn starts) and a post-turn hook so
+    senders (and humans) can see who is mid-turn before messaging.
+    """
+    try:
+        with _lock:
+            meta = dict(_state.get("meta") or {})
+        if not meta:
+            return
+        path = _registry_dir() / f"{meta.get('session_id')}.json"
+        if not path.exists():
+            return
+        data = json.loads(path.read_text())
+        data["turn_active"] = bool(active)
+        data["turn_ts"] = time.time()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except Exception:
+        pass  # never break a turn over registry bookkeeping
+
+
+def list_peers() -> tuple[list[dict], dict]:
+    """Live peers with busy state + self meta. For the tool's action=list."""
+    me = self_meta()
+    out = []
+    for name, meta in _load_peers().items():
+        if name == me.get("name"):
+            continue
+        out.append({
+            "name": name,
+            "cwd": meta.get("cwd"),
+            "busy": bool(meta.get("turn_active")),
+        })
+    return out, me
+
+
 def _load_peers() -> dict:
     """Read live peer metadata from the registry, keyed by name."""
     peers = {}

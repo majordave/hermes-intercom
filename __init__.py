@@ -60,12 +60,11 @@ def _check(_args=None) -> bool:
 def _handle(args: dict, **kw) -> str:
     action = args.get("action", "")
     if action == "list":
-        names = inbox.sweep_stale()
-        me = inbox.self_meta()
+        peers, me = inbox.list_peers()
         return json.dumps(
             {"ok": True,
              "self": {"name": me.get("name"), "cwd": me.get("cwd")},
-             "peers": [n for n in names if n != me.get("name")]},
+             "peers": peers},
             ensure_ascii=False,
         )
     if action == "send":
@@ -100,15 +99,24 @@ def _handle(args: dict, **kw) -> str:
 
 
 def _on_pre_llm_call(**kw) -> dict:
-    """Drain messages parked while this session was idle into the turn."""
+    """Mark turn active + drain messages parked while idle into the turn."""
     try:
+        inbox.set_turn_active(True)
         pending = inbox.take_pending()
     except Exception:
         return {}
     if not pending:
-        return {}
+        return {"context": ""}
     body = "\n\n".join(pending)
     return {"context": f"[Messages delivered from other sessions while you were idle]\n\n{body}"}
+
+
+def _on_session_end(**kw) -> None:
+    """Turn finished — publish idle state."""
+    try:
+        inbox.set_turn_active(False)
+    except Exception:
+        pass
 
 
 def register(ctx) -> None:
@@ -129,5 +137,6 @@ def register(ctx) -> None:
         try:
             inbox.start()
             ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+            ctx.register_hook("on_session_end", _on_session_end)
         except Exception as exc:
             logger.warning("intercom inbox failed to start: %s", exc)
