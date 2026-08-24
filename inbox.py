@@ -225,10 +225,11 @@ def _deliver_local(text: str, *, display: bool = True) -> str:
         return status
 
     # Busy path: steer drains between tool calls of the running turn.
-    if _is_turn_running(agent):
-        if agent.steer(text):
+    # Registry says busy even when process-local probes lag — steer anyway.
+    if _is_turn_running(agent) or reg_busy:
+        if hasattr(agent, "steer") and agent.steer(text):
             return "steered"
-        return "queued_steer_rejected"
+        return "held_steer_rejected"
     # Idle path: park it; the next user prompt sees it via take_pending().
     with _lock:
         pend = _state.setdefault("pending_for_self", [])
