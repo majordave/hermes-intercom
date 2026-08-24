@@ -84,8 +84,19 @@ def _registry_dir() -> Path:
 
 
 def _default_name() -> str:
+    """Stable per-profile name with a live-session suffix.
+
+    Profile identity comes from the HERMES_HOME path (…/profiles/<name>/
+    vs the default home), so two sessions of the same profile share a base
+    name and disambiguate by pid — mirroring Walkie Talkie's
+    agent_id + session_id split, simplified.
+    """
+    from hermes_constants import get_hermes_home
+
+    home = Path(get_hermes_home())
+    profile = home.name if home.parent.name == "profiles" else "default"
     cwd = Path.cwd().name or "session"
-    return f"{cwd[:24]}-{os.getpid() % 1000:03d}"
+    return f"{profile}-{cwd[:20]}-{os.getpid() % 1000:03d}"
 
 
 def sweep_stale() -> list[str]:
@@ -369,7 +380,18 @@ def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
     except (OSError, json.JSONDecodeError) as exc:
         return {"ok": False, "error": f"delivery failed: {exc}"}
 
-    return {"ok": reply.get("ok", False), "delivered_as": reply.get("status"), "to": name}
+    # Normalize receipt (Walkie Talkie-style taxonomy).
+    status = reply.get("status")
+    if status in ("submitted_as_turn",):
+        receipt = "delivered"       # receiver will start a turn
+    elif status in ("steered", "parked_idle", "parked_no_agent"):
+        receipt = "held"            # accepted, surfaces at next boundary/turn
+    elif status == "reply_resolved":
+        receipt = "delivered"
+    else:
+        receipt = "refused"
+    return {"ok": reply.get("ok", False), "receipt": receipt,
+            "delivered_as": status, "to": name}
 
 
 # ---------------------------------------------------------------------------
