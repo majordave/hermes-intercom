@@ -208,12 +208,19 @@ def _deliver_local(text: str, *, display: bool = True) -> str:
         # session whose agent lives in tui_gateway.entry). Park the message
         # anyway — the plugin's pre_llm_call hook drains it into the next
         # turn of whichever process received it.
+        spill = False
         with _lock:
             pend = _state.setdefault("pending_for_self", [])
             if len(pend) >= _PENDING_CAP:
-                return "rejected_pending_cap"
-            pend.append(text)
-        return "parked_no_agent"
+                spill = True
+                status = "held_spilled"
+            else:
+                pend.append(text)
+                spill = True
+                status = "parked_no_agent"
+        if spill:
+            _spool_append(text)   # outside the lock — self_meta() takes it
+        return status
 
     # Busy path: steer drains between tool calls of the running turn.
     if _is_turn_running(agent):
@@ -509,15 +516,16 @@ def start(name: str = "", session_id: str = "") -> None:
                 pass
 
     atexit.register(_cleanup)
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            prev = signal.getsignal(sig)
-            signal.signal(sig, lambda s, f, _p=prev: (_cleanup(), _p(s, f)))
-        except (ValueError, OSError):
-            pass
+    # NOTE: no custom signal handlers here — the host CLI owns SIGINT/SIGTERM
+    # semantics; atexit covers our cleanup on normal and signal-driven exits.
 
+    recovered = _spool_drain()
     with _lock:
         _state.update(running=True, cleanup=_cleanup, meta=meta, thread=t)
+        if recovered:
+            _state["pending_for_self"] = (
+                _state.get("pending_for_self", []) + recovered
+            )[-_PENDING_CAP * 2:]
 
 
 def stop() -> None:
@@ -531,6 +539,40 @@ def stop() -> None:
 def self_meta() -> dict:
     with _lock:
         return dict(_state.get("meta") or {})
+
+
+def _spool_file() -> Path:
+    """On-disk spill for parked messages: survives a receiver crash."""
+    sid = (self_meta().get("session_id") or str(os.getpid()))
+    return _base_dir() / "pending" / f"{sid}.jsonl"
+
+
+def _spool_append(text: str) -> None:
+    try:
+        f = _spool_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"text": text, "ts": time.time()}) + "\n")
+    except Exception:
+        pass
+
+
+def _spool_drain() -> list[str]:
+    """Load and remove spilled messages (called at inbox start)."""
+    try:
+        f = _spool_file()
+        if not f.exists():
+            return []
+        out = []
+        for line in f.read_text(encoding="utf-8").splitlines():
+            try:
+                out.append(str(json.loads(line)["text"]))
+            except Exception:
+                continue
+        f.unlink(missing_ok=True)
+        return out
+    except Exception:
+        return []
 
 
 def take_pending() -> list[str]:
