@@ -240,15 +240,86 @@ def _is_turn_running(agent) -> bool:
     return bool(getattr(agent, "_current_tool_count", None))
 
 
-def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "") -> dict:
-    """Send `message` to peer `target`. Returns status dict."""
+def _load_peers() -> dict:
+    """Read live peer metadata from the registry, keyed by name."""
     peers = {}
     for path in sorted(_registry_dir().glob("*.json")):
         try:
             meta = json.loads(path.read_text())
+            os.kill(int(meta["pid"]), 0)  # skip dead entries without sweeping
             peers.setdefault(meta["name"], meta)
         except Exception:
             continue
+    return peers
+
+
+def _reply_waiter_socket(request_id: str) -> str:
+    """Bind a one-shot reply socket for this process, keyed by request_id."""
+    reg = _registry_dir()
+    path = str(reg / f"reply-{request_id}.sock")
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return path
+
+
+def ask_to(
+    target: str,
+    message: str,
+    from_name: str = "",
+    from_cwd: str = "",
+    timeout: int = 600,
+) -> dict:
+    """Send `message` to peer and block until their reply or timeout.
+
+    The reply arrives on our own inbox as type='reply' addressed to
+    request_id; the inbox thread hands it to the waiter event.
+    """
+    request_id = f"{os.getpid():d}-{int(time.time()*1000)}"
+    evt = threading.Event()
+    with _lock:
+        _state.setdefault("waiters", {})[request_id] = {"evt": evt, "reply": None}
+
+    payload_extra = {
+        "type": "ask",
+        "request_id": request_id,
+        "ask_timeout": timeout,
+    }
+    res = send_to(target, message, from_name, from_cwd)
+    if not res.get("ok"):
+        with _lock:
+            _state.get("waiters", {}).pop(request_id, None)
+        return {**res, "action": "ask"}
+
+    # Ask accepted: wait for the peer's reply envelope on our inbox.
+    if not evt.wait(timeout=min(timeout, 3600)):
+        with _lock:
+            _state.get("waiters", {}).pop(request_id, None)
+        return {"ok": False, "error": "timeout waiting for reply",
+                "request_id": request_id, "action": "ask"}
+    with _lock:
+        entry = _state.get("waiters", {}).pop(request_id, None)
+    reply = (entry or {}).get("reply")
+    return {"ok": reply is not None, "reply": reply,
+            "from": target, "action": "ask"}
+
+
+def resolve_ask(request_id: str, reply_text: str) -> bool:
+    """Deliver a reply for a pending ask. True if a local waiter took it."""
+    with _lock:
+        w = _state.get("waiters", {}).get(request_id)
+        if w is None:
+            return False
+        w["reply"] = reply_text
+    w["evt"].set()
+    return True
+
+
+def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
+            payload_extra: dict | None = None) -> dict:
+    """Send `message` to peer `target`. Returns status dict."""
+    peers = _load_peers()
 
     matches = [n for n in peers if n == target or n.startswith(target)]
     if not matches:
@@ -281,6 +352,7 @@ def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "") 
         "from_name": from_name,
         "from_cwd": from_cwd,
         "message": message[:_MAX_MSG_CHARS],
+        **(payload_extra or {}),
     }
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -317,13 +389,32 @@ def _serve(conn: socket.socket) -> None:
                 break
         line = data.split(b"\n", 1)[0].decode(errors="replace").strip()
         req = json.loads(line) if line else {}
-        if req.get("type") != "send":
-            raise ValueError(f"unsupported type {req.get('type')!r}")
+        req_type = req.get("type", "send")
+        if req_type not in ("send", "ask", "reply"):
+            raise ValueError(f"unsupported type {req_type!r}")
+        if req_type == "reply":
+            # Reply to one of OUR asks: hand it to the local waiter.
+            ok = resolve_ask(str(req.get("request_id", "")),
+                             str(req.get("message", "")))
+            resp = {"ok": ok, "status": "reply_resolved" if ok else "no_pending_ask"}
+            conn.sendall((json.dumps(resp) + "\n").encode())
+            conn.close()
+            return
         text = _wrap(
-            req.get("from_name") or "unknown",
+            _sanitize_name(req.get("from_name") or "unknown"),
             req.get("from_cwd") or "?",
             str(req.get("message", ""))[:_MAX_MSG_CHARS],
         )
+        if req_type == "ask" and req.get("request_id"):
+            # Tell the receiving agent this needs a reply, and how.
+            rid = str(req["request_id"])
+            asker = _sanitize_name(req.get("from_name") or "unknown")
+            text = (
+                f"{text}\n"
+                f"[The sender expects a reply. Use intercom(action=\"send\", "
+                f"to=\"{asker}\", message=\"...\") — your reply is routed "
+                f"back to their pending ask automatically.]"
+            )
         status = _deliver_local(text, display=True)
         resp = {"ok": status not in ("rejected_pending_cap",), "status": status}
     except Exception as exc:  # never crash the thread

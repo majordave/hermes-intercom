@@ -31,8 +31,8 @@ _SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "send"],
-                "description": "List peers, or send a message to one.",
+                "enum": ["list", "send", "ask"],
+                "description": "List peers, send a message, or ask (send + block until reply).",
             },
             "to": {
                 "type": "string",
@@ -41,6 +41,10 @@ _SCHEMA = {
             "message": {
                 "type": "string",
                 "description": "Plain-text message body (max 8000 chars).",
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Seconds to wait for a reply when action=ask (default 600, max 3600).",
             },
         },
         "required": ["action"],
@@ -75,6 +79,21 @@ def _handle(args: dict, **kw) -> str:
             message=message,
             from_name=me.get("name") or "unknown",
             from_cwd=me.get("cwd") or "?",
+        )
+        return json.dumps(res, ensure_ascii=False)
+    if action == "ask":
+        target = args.get("to", "")
+        message = args.get("message", "")
+        if not target or not message:
+            return json.dumps({"ok": False, "error": "'to' and 'message' are required"})
+        timeout = max(10, min(int(args.get("timeout") or 600), 3600))
+        me = inbox.self_meta()
+        res = inbox.ask_to(
+            target=target,
+            message=message,
+            from_name=me.get("name") or "unknown",
+            from_cwd=me.get("cwd") or "?",
+            timeout=timeout,
         )
         return json.dumps(res, ensure_ascii=False)
     return json.dumps({"ok": False, "error": f"unknown action {action!r}"})
