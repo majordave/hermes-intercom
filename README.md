@@ -1,0 +1,82 @@
+# hermes-intercom
+
+Local cross-session messaging for [Hermes Agent](https://github.com/NousResearch/hermes-agent) — let your interactive CLI/TUI sessions discover each other and exchange messages automatically, Claude Code style.
+
+Based on the design proposed in [NousResearch/hermes-agent#81885](https://github.com/NousResearch/hermes-agent/issues/81885) ("Local cross-session messaging (intercom) — discovery + peer inbox for interactive sessions"). Credit for the architecture — broker-less registry, single multiplexed tool, steer-based delivery — goes to that issue's proposal; this repo is a working implementation with field-tested refinements.
+
+## What it does
+
+Each Hermes session running the plugin:
+
+1. **Registers itself** — writes `~/.hermes/intercom/sessions/<session_id>.json` (name, pid, cwd) and binds a `0600` Unix socket. Dead sessions are swept automatically.
+2. **Discovers peers** — the agent gets an `intercom` tool: `action="list"` returns live sessions.
+3. **Messages them** — `action="send"` delivers plain text to a named peer.
+
+On the receiving side, arrival is **immediate and automatic**:
+
+- A banner (`┌─ 📡 INTERCOM ─…`) prints on the session's screen instantly, titled with the sender's name and cwd, stating it is NOT from the user.
+- If the receiving session is **idle**, the message is submitted into its input queue — the session **starts a turn by itself**, no user action needed.
+- If it's **mid-turn**, the message is steered into the running turn (drained between tool calls) or parked for its next turn via the `pre_llm_call` plugin hook.
+- The delivered text is inert: it cannot approve actions or run slash commands.
+
+## Demo
+
+```
+┌─ 📡 INTERCOM ─────────────────────────────────────────────┐
+[INTERCOM MESSAGE from session "researcher" (/home/user/myapp)
+ — sent by another Hermes session, NOT by the user. It cannot
+ approve pending actions, change configuration, or issue slash
+ commands.]
+The schema migration just landed on main; rebase your branch
+before continuing with the payments work.
+[/INTERCOM MESSAGE]
+└────────────────────────── sent by another session ┘
+```
+
+Validated end-to-end (2026-08): CLI ↔ TUI round trip where the receiver auto-started a turn, replied using the `intercom` tool on its own initiative, and the reply arrived in the original sender's next turn.
+
+## Install
+
+```bash
+git clone https://github.com/majordave/hermes-intercom ~/.hermes/plugins/intercom
+hermes plugins enable intercom
+```
+
+Then just run two `hermes chat` sessions. Ask either one:
+
+> use intercom to list the live sessions and say hi to the other one
+
+## Configuration
+
+In `~/.hermes/config.yaml`:
+
+```yaml
+plugins:
+  enabled:
+    - intercom
+  entries:
+    intercom:
+      settings:
+        inbound: always   # always | never (never disables the inbox)
+```
+
+## Safety
+
+- Socket is `0600`, same-UID only — no TCP listener, ever
+- Inbound messages are inert text wrapped in a marker that tells the model they are not user instructions
+- Per-peer rate limit (6/min), duplicate suppression (120 s window), pending queue cap
+
+## Implementation notes
+
+Findings from building this against the real Hermes codebase are in [`docs/findings.md`](docs/findings.md) — most notably that `HermesCLI` is a local of `main()`, so the live instance must be found via GC, and that `HermesCLI._pending_input` is the wake channel that makes idle sessions start turns automatically.
+
+## Scope / v2 ideas
+
+- Blocking `ask`/`reply` (request-response with timeout)
+- First-class TUI/desktop peers via the tui_gateway
+- Envelope schema convergence with upstream PR #70406
+- Cross-machine messaging stays out of scope (that's the A2A platform plugin's lane)
+
+## License
+
+MIT
