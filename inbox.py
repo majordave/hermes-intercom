@@ -196,7 +196,9 @@ def _deliver_local(text: str, *, display: bool = True) -> str:
     # in its process_loop thread (0.1s poll). Putting the message there makes
     # the receiving session START A TURN automatically — Claude Code parity.
     pq = getattr(cli_obj, "_pending_input", None) if cli_obj is not None else None
-    if pq is not None and not getattr(cli_obj, "_agent_running", False):
+    proc_busy = bool(getattr(cli_obj, "_agent_running", False)) or _is_turn_running(agent)
+    reg_busy = self_registry_turn_active()
+    if pq is not None and not proc_busy and not reg_busy:
         try:
             pq.put(text)
             return "submitted_as_turn"
@@ -295,6 +297,19 @@ def list_peers() -> tuple[list[dict], dict]:
             "busy": bool(meta.get("turn_active")),
         })
     return out, me
+
+
+def self_registry_turn_active() -> bool:
+    """Read this session's own published turn_active flag (registry JSON)."""
+    try:
+        with _lock:
+            sid = (_state.get("meta") or {}).get("session_id")
+        if not sid:
+            return False
+        p = _registry_dir() / f"{sid}.json"
+        return bool(json.loads(p.read_text()).get("turn_active"))
+    except Exception:
+        return False
 
 
 def _load_peers() -> dict:
