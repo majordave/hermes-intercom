@@ -45,17 +45,22 @@ _dedupe: dict[str, list[tuple[str, float]]] = {}  # peer_name -> [(hash, ts)]
 
 
 def _human_view(header: str, body: str) -> str:
-    """Reasoning-style block: horizontal rules top/bottom, no side borders.
+    """Reasoning-style box: top/bottom rules with side corners, no side rails.
 
     First line: "📡 INTERCOM · <sender>" — sender to the right of the
-    title, no duplicated emoji.
+    title, single emoji.
     """
     import shutil
 
     title = f"📡 INTERCOM · {header}"
     term_w = shutil.get_terminal_size((100, 20)).columns
-    rule = "─" * max(20, min(term_w, 100))
-    return f"{rule}\n{title}\n{body}\n{rule}"
+    w = max(40, min(term_w, 120))
+    body_lines = body.split("\n")
+    out = [f"┌─ 📡 INTERCOM · {header} " + "─" * max(3, w - len(f"┌─ 📡 INTERCOM · {header} ") - 1) + "┐"]
+    for l in body_lines:
+        out.append(l)
+    out.append("└" + "─" * (w - 1) + "┘")
+    return "\n".join(out)
 
 
 def _display_banner(human_text: str) -> None:
