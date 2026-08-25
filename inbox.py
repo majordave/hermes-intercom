@@ -132,8 +132,6 @@ def _sanitize_boundary(text: str) -> str:
     analog: Walkie Talkie SEC-R2). Insert zero-width spaces into any
     boundary-like tag so it no longer parses as one.
     """
-    for tag in ("[INTERCOM MESSAGE", "[/INTERCOM MESSAGE]", "[INTERCOM from", "[/INTERCOM]"):
-        text = text.replace(tag, tag[:1] + "\u200b" + tag[1:])
     # Header forgery: a body line mimicking our new header format gets broken
     # by a zero-width space right after the emoji, so only the true first
     # line (added by _wrap) parses as the header.
@@ -151,9 +149,7 @@ def _wrap(from_name: str, from_cwd: str, message: str) -> str:
     """Frame an inbound message: identity header + body + delivery footer.
 
     No bracketed tags around the body — the header carries the sender
-    identity and the footer marks where the frame ends. The sanitizer
-    still strips anything that *looks* like a legacy INTERCOM tag from
-    the body so old-format text can't fake a frame.
+    identity and the footer marks where the frame ends.
     """
     from_name = _sanitize_name(from_name)
     message = _sanitize_boundary(str(message))
