@@ -45,35 +45,17 @@ _dedupe: dict[str, list[tuple[str, float]]] = {}  # peer_name -> [(hash, ts)]
 
 
 def _human_view(header: str, body: str) -> str:
-    """Compact boxed rendering for the human — no trust boilerplate.
+    """Reasoning-style block: horizontal rules top/bottom, no side borders.
 
-    All rows are padded to identical display width so borders align.
-    Emoji-aware padding: len("📡")==1 but it renders 2 columns.
+    First line: "📡 INTERCOM · <sender>" — sender to the right of the
+    title, no duplicated emoji.
     """
     import shutil
 
-    def dlen(s: str) -> int:
-        return len(s) + sum(1 for ch in s if ord(ch) > 0x1F000)
-
-    def pad(s: str, width: int) -> str:
-        """Left-align s to `width` display columns."""
-        deficit = dlen(s) - len(s)
-        return s.ljust(width - deficit)
-
-    title = f"📡 {header}"
-    body_lines = body.split("\n")
+    title = f"📡 INTERCOM · {header}"
     term_w = shutil.get_terminal_size((100, 20)).columns
-    inner = min(max([dlen(title)] + [dlen(l) for l in body_lines] + [24]), max(term_w - 4, 24))
-    # Every row targets display width W = inner + 4 ("│ " + inner + " │").
-    W = inner + 4
-    label = "┌─ 📡 INTERCOM "
-    top_dashes = max(3, W - dlen(label) - 1)
-    rows = [label + "─" * top_dashes + "┐"]
-    rows.append(f"│ {pad(title, inner)} │")
-    for l in body_lines:
-        rows.append(f"│ {pad(l[:inner], inner)} │")
-    rows.append("└" + "─" * (W - 2) + "┘")
-    return "\n".join(rows)
+    rule = "─" * max(20, min(term_w, 100))
+    return f"{rule}\n{title}\n{body}\n{rule}"
 
 
 def _display_banner(human_text: str) -> None:
