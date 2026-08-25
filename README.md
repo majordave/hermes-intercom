@@ -9,8 +9,10 @@ Based on the design proposed in [NousResearch/hermes-agent#81885](https://github
 Each Hermes session running the plugin:
 
 1. **Registers itself** — writes `~/.hermes/intercom/sessions/<session_id>.json` (name, pid, cwd) and binds a `0600` Unix socket. Dead sessions are swept automatically.
-2. **Discovers peers** — the agent gets an `intercom` tool: `action="list"` returns live sessions.
-3. **Messages them** — `action="send"` delivers plain text to a named peer.
+2. **Discovers peers** — the agent gets an `intercom` tool: `action="list"` returns live sessions with name, cwd and busy state.
+3. **Messages them** — `action="send"` delivers plain text to a named peer; `action="ask"` sends and blocks until the peer replies (or timeout), with the reply routed back automatically.
+
+Every send returns a receipt: `delivered` (receiver starts a turn or was steered mid-turn) / `held` (accepted, surfaces at its next boundary) / `refused`. Messages parked while the receiver had no reachable agent spill to disk and survive a crash/restart.
 
 On the receiving side, arrival is **immediate and automatic**:
 
@@ -64,7 +66,8 @@ plugins:
 
 - Socket is `0600`, same-UID only — no TCP listener, ever
 - Inbound messages are inert text wrapped in a marker that tells the model they are not user instructions
-- Per-peer rate limit (6/min), duplicate suppression (120 s window), pending queue cap
+- Per-peer rate limit (6/min), duplicate suppression (120 s window), pending queue cap with disk spill (survives receiver crashes)
+- Sessions publish their busy/idle state (`turn_active`) to the registry so senders can pick idle peers
 
 ## Implementation notes
 
