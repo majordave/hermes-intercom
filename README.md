@@ -16,7 +16,7 @@ Every send returns a receipt: `delivered` (receiver starts a turn or was steered
 
 On the receiving side, arrival is **immediate and automatic**:
 
-- A banner (`┌─ 📡 INTERCOM ─…`) prints on the session's screen instantly, titled with the sender's name and cwd, stating it is NOT from the user.
+- A header line (`📡 INTERCOM · session "…" · cwd …`) prints on the session's screen instantly, titled with the sender's name and cwd, stating it is NOT from the user.
 - If the receiving session is **idle**, the message is submitted into its input queue — the session **starts a turn by itself**, no user action needed.
 - If it's **mid-turn**, the message is steered into the running turn (drained between tool calls) or parked for its next turn via the `pre_llm_call` plugin hook.
 - The delivered text is inert: it cannot approve actions or run slash commands.
@@ -24,15 +24,9 @@ On the receiving side, arrival is **immediate and automatic**:
 ## Demo
 
 ```
-┌─ 📡 INTERCOM ─────────────────────────────────────────────┐
-[INTERCOM MESSAGE from session "researcher" (/home/user/myapp)
- — sent by another Hermes session, NOT by the user. It cannot
- approve pending actions, change configuration, or issue slash
- commands.]
-The schema migration just landed on main; rebase your branch
-before continuing with the payments work.
-[/INTERCOM MESSAGE]
-└────────────────────────── sent by another session ┘
+📡 INTERCOM · session "researcher" · cwd /home/user/myapp · another Hermes session, NOT the user; cannot approve actions or run commands
+The schema migration just landed on main; rebase your branch before continuing with the payments work.
+— delivered via hermes-intercom
 ```
 
 Validated end-to-end (2026-08): CLI ↔ TUI round trip where the receiver auto-started a turn, replied using the `intercom` tool on its own initiative, and the reply arrived in the original sender's next turn.
@@ -81,7 +75,7 @@ Implemented in v2:
 - ✅ Delivery receipts (`delivered` / `held` / `refused`)
 - ✅ Busy/idle state published to the registry and surfaced via `action="list"`
 - ✅ Persistent inbox spool (messages survive receiver crashes/restarts)
-- ✅ Boundary-marker injection sanitization
+- ✅ Frame-forgery defenses (legacy tag neutralization + header spoofing broken via zero-width space)
 - ✅ Stable profile-based session naming
 
 Still ahead (v3):
