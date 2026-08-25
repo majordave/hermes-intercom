@@ -73,12 +73,25 @@ plugins:
 
 Findings from building this against the real Hermes codebase are in [`docs/findings.md`](docs/findings.md) — most notably that `HermesCLI` is a local of `main()`, so the live instance must be found via GC, and that `HermesCLI._pending_input` is the wake channel that makes idle sessions start turns automatically.
 
-## Scope / v2 ideas
+## Roadmap
 
-- Blocking `ask`/`reply` (request-response with timeout)
+Implemented in v2:
+
+- ✅ Blocking `ask`/`reply` (request-response with timeout)
+- ✅ Delivery receipts (`delivered` / `held` / `refused`)
+- ✅ Busy/idle state published to the registry and surfaced via `action="list"`
+- ✅ Persistent inbox spool (messages survive receiver crashes/restarts)
+- ✅ Boundary-marker injection sanitization
+- ✅ Stable profile-based session naming
+
+Still ahead (v3):
+
 - First-class TUI/desktop peers via the tui_gateway
-- Envelope schema convergence with upstream PR #70406
-- Cross-machine messaging stays out of scope (that's the A2A platform plugin's lane)
+- Stable `agent_id` per profile (decoupling identity from pid)
+- Migrate delivery to the official host seam if upstream #70406 merges
+- Windows named pipes
+
+Cross-machine messaging stays out of scope — that's the A2A platform plugin's lane.
 
 ## License
 
