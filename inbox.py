@@ -66,8 +66,14 @@ def _human_view(header: str, body: str) -> str:
         # header too long: truncate it so the corner still fits on row 1
         keep = max(10, w - 4 - (dlen(top_label) - len(top_label)))
         out = [top_label[:keep] + "…┐"]
+    import textwrap
+
     for l in body.split("\n"):
-        out.append(l[:w])
+        if not l:
+            out.append("")
+            continue
+        out.extend(textwrap.wrap(l, width=w, replace_whitespace=False,
+                                 drop_whitespace=False) or [""])
     out.append("└" + "─" * (w - 2) + "┘")
     return "\n".join(out)
 
