@@ -47,19 +47,28 @@ _dedupe: dict[str, list[tuple[str, float]]] = {}  # peer_name -> [(hash, ts)]
 def _human_view(header: str, body: str) -> str:
     """Reasoning-style box: top/bottom rules with side corners, no side rails.
 
-    First line: "📡 INTERCOM · <sender>" — sender to the right of the
-    title, single emoji.
+    The title line never exceeds the box width: if the header is long the
+    dashes shrink to the minimum and the ┐ corner still lands at column W.
     """
     import shutil
 
-    title = f"📡 INTERCOM · {header}"
     term_w = shutil.get_terminal_size((100, 20)).columns
     w = max(40, min(term_w, 120))
-    body_lines = body.split("\n")
-    out = [f"┌─ 📡 INTERCOM · {header} " + "─" * max(3, w - len(f"┌─ 📡 INTERCOM · {header} ") - 1) + "┐"]
-    for l in body_lines:
-        out.append(l)
-    out.append("└" + "─" * (w - 1) + "┘")
+    def dlen(s: str) -> int:
+        """Display width: emoji/CJK count 2 columns."""
+        return len(s) + sum(1 for ch in s if ord(ch) > 0x1F000)
+
+    top_label = f"┌─ 📡 INTERCOM · {header} "
+    top_dlen = dlen(top_label)
+    if top_dlen + 2 <= w:
+        out = [top_label + "─" * (w - top_dlen - 1) + "┐"]
+    else:
+        # header too long: truncate it so the corner still fits on row 1
+        keep = max(10, w - 4 - (dlen(top_label) - len(top_label)))
+        out = [top_label[:keep] + "…┐"]
+    for l in body.split("\n"):
+        out.append(l[:w])
+    out.append("└" + "─" * (w - 2) + "┘")
     return "\n".join(out)
 
 
