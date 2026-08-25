@@ -57,6 +57,21 @@ def _check(_args=None) -> bool:
     return True
 
 
+def _strip_echo_headers(message: str) -> str:
+    """Drop lines the sending LLM echoed from a received frame.
+
+    When an agent replies via intercom it often quotes the incoming
+    header ("📡 hermes@X says:") at the top of its own message. The
+    receiver would then render two headers — one real, one quoted.
+    """
+    import re
+
+    lines = message.splitlines()
+    while lines and re.match(r"\s*📡\s*hermes@.*says:", lines[0]):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 def _handle(args: dict, **kw) -> str:
     action = args.get("action", "")
     if action == "list":
@@ -75,7 +90,7 @@ def _handle(args: dict, **kw) -> str:
         me = inbox.self_meta()
         res = inbox.send_to(
             target=target,
-            message=message,
+            message=_strip_echo_headers(message),
             from_name=me.get("name") or "unknown",
             from_cwd=me.get("cwd") or "?",
         )
