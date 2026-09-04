@@ -12,7 +12,7 @@ Each Hermes session running the plugin:
 2. **Discovers peers** — the agent gets an `intercom` tool: `action="list"` returns live sessions with name, cwd and busy state.
 3. **Messages them** — `action="send"` delivers plain text to a named peer; `action="ask"` sends and blocks until the peer replies (or timeout), with the reply routed back automatically.
 
-Every send returns a receipt: `delivered` (receiver starts a turn or was steered mid-turn) / `held` (accepted, surfaces at its next boundary) / `refused`. Messages parked while the receiver had no reachable agent spill to disk and survive a crash/restart.
+Every send returns a receipt: `delivered` (receiver starts a turn or was steered mid-turn) / `held` (accepted, surfaces at its next boundary) / `refused`. Messages parked while the receiver has no reachable agent spill to an owner-only file for that endpoint's lifetime.
 
 On the receiving side, arrival is **immediate and automatic**:
 
@@ -64,9 +64,9 @@ plugins:
 
 ## Safety
 
-- Socket is `0600`, same-UID only — no TCP listener, ever
+- Socket is `0600`, and the receiver verifies the peer UID — no TCP listener, ever
 - Inbound messages are inert text; the frame identifies the sending session so the model never mistakes it for user instructions
-- Per-peer rate limit (6/min), duplicate suppression (120 s window), pending queue cap with disk spill (survives receiver crashes)
+- Per-peer rate limit (6/min), duplicate suppression (120 s window), pending queue cap with owner-only disk spill
 - Sessions publish their busy/idle state (`turn_active`) to the registry so senders can pick idle peers
 
 ## Implementation notes
@@ -77,10 +77,10 @@ Findings from building this against the real Hermes codebase are in [`docs/findi
 
 Implemented in v2/v3:
 
-- ✅ Blocking `ask`/`reply` (request-response with timeout)
+- ✅ Blocking `ask`/`reply` (request-response with explicit request IDs and timeout)
 - ✅ Delivery receipts (`delivered` / `held` / `refused`)
 - ✅ Busy/idle state published to the registry and surfaced via `action="list"`
-- ✅ Persistent inbox spool (messages survive receiver crashes/restarts)
+- ✅ Owner-only inbox spool for parked messages during an endpoint's lifetime
 - ✅ Frame-forgery defenses (legacy tag neutralization + header spoofing broken via zero-width space)
 - ✅ Stable profile-based session naming
 - ✅ Single-render compact frame (`📡 hermes@<session> says:`) — no duplicate banner/turn rendering
@@ -90,6 +90,7 @@ Still ahead:
 
 - First-class TUI/desktop peers via the tui_gateway
 - Stable `agent_id` per profile (decoupling identity from pid)
+- Durable mailbox identity for recovery across process restarts
 - Migrate delivery to the official host seam if upstream #70406 merges
 - Windows named pipes
 

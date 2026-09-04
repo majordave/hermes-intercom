@@ -20,11 +20,12 @@ import atexit
 import json
 import logging
 import os
-import signal
 import socket
+import struct
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ _lock = threading.Lock()
 _state: dict = {}          # session-scoped singleton state
 _pending_by_peer: dict[str, list[dict]] = {}   # peer_name -> [envelopes]
 _rate: dict[str, list[float]] = {}             # peer_name -> timestamps
-_dedupe: dict[str, list[tuple[str, float]]] = {}  # peer_name -> [(hash, ts)]
+_dedupe: dict[str, list[tuple[int, float]]] = {}  # peer_name -> [(hash, ts)]
 
 
 def _human_view(header: str, body: str) -> str:
@@ -378,17 +379,31 @@ def ask_to(
     The reply arrives on our own inbox as type='reply' addressed to
     request_id; the inbox thread hands it to the waiter event.
     """
-    request_id = f"{os.getpid():d}-{int(time.time()*1000)}"
+    resolved_target = resolve_target(target)
+    if not resolved_target.get("ok"):
+        return {**resolved_target, "action": "ask"}
+    expected_peer = _sanitize_name(resolved_target["name"])
+    request_id = uuid.uuid4().hex
     evt = threading.Event()
     with _lock:
-        _state.setdefault("waiters", {})[request_id] = {"evt": evt, "reply": None}
+        _state.setdefault("waiters", {})[request_id] = {
+            "evt": evt,
+            "reply": None,
+            "expected_peer": expected_peer,
+        }
 
     payload_extra = {
         "type": "ask",
         "request_id": request_id,
         "ask_timeout": timeout,
     }
-    res = send_to(target, message, from_name, from_cwd)
+    res = send_to(
+        resolved_target["name"],
+        message,
+        from_name,
+        from_cwd,
+        payload_extra=payload_extra,
+    )
     if not res.get("ok"):
         with _lock:
             _state.get("waiters", {}).pop(request_id, None)
@@ -407,47 +422,96 @@ def ask_to(
             "from": target, "action": "ask"}
 
 
-def resolve_ask(request_id: str, reply_text: str) -> bool:
+def resolve_ask(request_id: str, from_name: str, reply_text: str) -> bool:
     """Deliver a reply for a pending ask. True if a local waiter took it."""
     with _lock:
         w = _state.get("waiters", {}).get(request_id)
-        if w is None:
+        if w is None or w.get("expected_peer") != from_name:
             return False
         w["reply"] = reply_text
     w["evt"].set()
     return True
 
 
-def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
-            payload_extra: dict | None = None) -> dict:
-    """Send `message` to peer `target`. Returns status dict."""
-    peers = _load_peers()
+def reply_to(
+    target: str,
+    request_id: str,
+    message: str,
+    from_name: str = "",
+    from_cwd: str = "",
+) -> dict:
+    """Reply to a peer's pending ask using its original request id."""
+    return send_to(
+        target,
+        message,
+        from_name,
+        from_cwd,
+        payload_extra={"type": "reply", "request_id": request_id},
+        dedupe=False,
+    )
 
-    matches = [n for n in peers if n == target or n.startswith(target)]
+
+def resolve_target(target: str) -> dict:
+    """Resolve a unique live peer name from an exact name or prefix."""
+    peers = _load_peers()
+    if target in peers:
+        return {"ok": True, "name": target, "meta": peers[target]}
+    matches = [name for name in peers if name == target or name.startswith(target)]
     if not matches:
         sweep_stale()
-        return {"ok": False, "error": f"no live peer named '{target}'", "peers": sweep_stale()}
+        return {
+            "ok": False,
+            "error": f"no live peer named '{target}'",
+            "peers": sweep_stale(),
+        }
     if len(matches) > 1:
         return {"ok": False, "error": f"ambiguous name; matches: {matches}"}
+    return {"ok": True, "name": matches[0], "meta": peers[matches[0]]}
 
-    meta = peers[matches[0]]
+
+def _exchange(meta: dict, payload: dict) -> dict:
+    """Exchange one authenticated-local envelope with a registered peer."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(5)
+            connection.connect(meta["socket"])
+            connection.sendall((json.dumps(payload) + "\n").encode())
+            data = b""
+            while b"\n" not in data:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        return json.loads(data.decode().strip() or "{}")
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"delivery failed: {exc}"}
+
+
+def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
+            payload_extra: dict | None = None, *, dedupe: bool = True) -> dict:
+    """Send `message` to peer `target`. Returns status dict."""
+    resolved_target = resolve_target(target)
+    if not resolved_target.get("ok"):
+        return resolved_target
+    name = resolved_target["name"]
+    meta = resolved_target["meta"]
     if int(meta.get("pid", -1)) == os.getpid():
         return {"ok": False, "error": "target is the current session"}
 
     now = time.time()
-    name = matches[0]
     with _lock:
         window = [t for t in _rate.get(name, []) if now - t < _RATE_WINDOW_S]
         if len(window) >= _RATE_MAX_PER_PEER:
             return {"ok": False, "error": "rate limit reached for this peer"}
         window.append(now)
         _rate[name] = window
-        seen = [(h, t) for h, t in _dedupe.get(name, []) if now - t < _DEDUPE_WINDOW_S]
-        digest = hash(message)
-        if any(h == digest for h, _ in seen):
-            return {"ok": False, "error": "identical message already sent recently"}
-        seen.append((digest, now))
-        _dedupe[name] = seen
+        if dedupe:
+            seen = [(h, t) for h, t in _dedupe.get(name, []) if now - t < _DEDUPE_WINDOW_S]
+            digest = hash(message)
+            if any(h == digest for h, _ in seen):
+                return {"ok": False, "error": "identical message already sent recently"}
+            seen.append((digest, now))
+            _dedupe[name] = seen
 
     payload = {
         "type": "send",
@@ -456,20 +520,9 @@ def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
         "message": message[:_MAX_MSG_CHARS],
         **(payload_extra or {}),
     }
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-            s.settimeout(5)
-            s.connect(meta["socket"])
-            s.sendall((json.dumps(payload) + "\n").encode())
-            data = b""
-            while b"\n" not in data:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-        reply = json.loads(data.decode().strip() or "{}")
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"ok": False, "error": f"delivery failed: {exc}"}
+    reply = _exchange(meta, payload)
+    if not reply.get("ok") and reply.get("error"):
+        return {**reply, "receipt": "refused", "to": name}
 
     # Normalize receipt (Walkie Talkie-style taxonomy).
     status = reply.get("status")
@@ -489,8 +542,31 @@ def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
 # inbox server thread
 # ---------------------------------------------------------------------------
 
+def _peer_uid(conn: socket.socket) -> int:
+    """Return the effective UID authenticated by the local socket transport."""
+    getpeereid = getattr(conn, "getpeereid", None)
+    if getpeereid is not None:
+        uid, _gid = getpeereid()
+        return int(uid)
+    local_peercred = getattr(socket, "LOCAL_PEERCRED", None)
+    if local_peercred is not None:
+        raw = conn.getsockopt(0, local_peercred, 12)
+        _version, uid, _groups = struct.unpack("@iIh", raw[:10])
+        return int(uid)
+    so_peercred = getattr(socket, "SO_PEERCRED", None)
+    if so_peercred is not None:
+        raw = conn.getsockopt(socket.SOL_SOCKET, so_peercred, 12)
+        _pid, uid, _gid = struct.unpack("3i", raw)
+        return int(uid)
+    raise PermissionError("peer uid authentication is unavailable on this platform")
+
 def _serve(conn: socket.socket) -> None:
     try:
+        peer_uid = _peer_uid(conn)
+        if peer_uid != os.getuid():
+            raise PermissionError(
+                f"peer uid {peer_uid} does not match server uid {os.getuid()}"
+            )
         data = b""
         conn.settimeout(10)
         while b"\n" not in data:
@@ -507,8 +583,11 @@ def _serve(conn: socket.socket) -> None:
             raise ValueError(f"unsupported type {req_type!r}")
         if req_type == "reply":
             # Reply to one of OUR asks: hand it to the local waiter.
-            ok = resolve_ask(str(req.get("request_id", "")),
-                             str(req.get("message", "")))
+            ok = resolve_ask(
+                str(req.get("request_id", "")),
+                _sanitize_name(req.get("from_name") or "unknown"),
+                str(req.get("message", "")),
+            )
             resp = {"ok": ok, "status": "reply_resolved" if ok else "no_pending_ask"}
             conn.sendall((json.dumps(resp) + "\n").encode())
             conn.close()
@@ -523,9 +602,8 @@ def _serve(conn: socket.socket) -> None:
             asker = _sanitize_name(req.get("from_name") or "unknown")
             text = (
                 f"{text}\n"
-                f"[The sender expects a reply. Use intercom(action=\"send\", "
-                f"to=\"{asker}\", message=\"...\") — your reply is routed "
-                f"back to their pending ask automatically.]"
+                f"[The sender expects a reply. Use intercom(action=\"reply\", "
+                f"to=\"{asker}\", request_id=\"{rid}\", message=\"...\").]"
             )
         status = _deliver_local(text)
         resp = {"ok": status not in ("rejected_pending_cap",), "status": status}
@@ -602,9 +680,10 @@ def start(name: str = "", session_id: str = "") -> None:
     # NOTE: no custom signal handlers here — the host CLI owns SIGINT/SIGTERM
     # semantics; atexit covers our cleanup on normal and signal-driven exits.
 
-    recovered = _spool_drain()
     with _lock:
         _state.update(running=True, cleanup=_cleanup, meta=meta, thread=t)
+    recovered = _spool_drain(session_id=sid)
+    with _lock:
         if recovered:
             _state["pending_for_self"] = (
                 _state.get("pending_for_self", []) + recovered
@@ -624,9 +703,9 @@ def self_meta() -> dict:
         return dict(_state.get("meta") or {})
 
 
-def _spool_file() -> Path:
-    """On-disk spill for parked messages: survives a receiver crash."""
-    sid = (self_meta().get("session_id") or str(os.getpid()))
+def _spool_file(session_id: str = "") -> Path:
+    """Owner-only on-disk spill for parked messages scoped to one endpoint id."""
+    sid = session_id or self_meta().get("session_id") or str(os.getpid())
     return _base_dir() / "pending" / f"{sid}.jsonl"
 
 
@@ -634,16 +713,18 @@ def _spool_append(text: str) -> None:
     try:
         f = _spool_file()
         f.parent.mkdir(parents=True, exist_ok=True)
-        with f.open("a", encoding="utf-8") as fh:
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.chmod(f, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"text": text, "ts": time.time()}) + "\n")
     except Exception:
         pass
 
 
-def _spool_drain() -> list[str]:
+def _spool_drain(session_id: str = "") -> list[str]:
     """Load and remove spilled messages (called at inbox start)."""
     try:
-        f = _spool_file()
+        f = _spool_file(session_id)
         if not f.exists():
             return []
         out = []
