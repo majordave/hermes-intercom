@@ -1,4 +1,7 @@
 name: intercom
-version: 0.1.0
+version: 0.2.0
 description: "Local cross-session messaging: sessions discover each other and exchange plain-text messages via Unix sockets. Delivered mid-turn via steer or at next turn when idle."
 author: "majordave"
+kind: standalone
+provides_tools:
+  - intercom

@@ -20,8 +20,8 @@ import atexit
 import json
 import logging
 import os
-import signal
 import socket
+import struct
 import sys
 import threading
 import time
@@ -388,7 +388,13 @@ def ask_to(
         "request_id": request_id,
         "ask_timeout": timeout,
     }
-    res = send_to(target, message, from_name, from_cwd)
+    res = send_to(
+        target,
+        message,
+        from_name,
+        from_cwd,
+        payload_extra=payload_extra,
+    )
     if not res.get("ok"):
         with _lock:
             _state.get("waiters", {}).pop(request_id, None)
@@ -416,6 +422,23 @@ def resolve_ask(request_id: str, reply_text: str) -> bool:
         w["reply"] = reply_text
     w["evt"].set()
     return True
+
+
+def reply_to(
+    target: str,
+    request_id: str,
+    message: str,
+    from_name: str = "",
+    from_cwd: str = "",
+) -> dict:
+    """Reply to a peer's pending ask using its original request id."""
+    return send_to(
+        target,
+        message,
+        from_name,
+        from_cwd,
+        payload_extra={"type": "reply", "request_id": request_id},
+    )
 
 
 def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
@@ -489,8 +512,31 @@ def send_to(target: str, message: str, from_name: str = "", from_cwd: str = "",
 # inbox server thread
 # ---------------------------------------------------------------------------
 
+def _peer_uid(conn: socket.socket) -> int:
+    """Return the effective UID authenticated by the local socket transport."""
+    getpeereid = getattr(conn, "getpeereid", None)
+    if getpeereid is not None:
+        uid, _gid = getpeereid()
+        return int(uid)
+    local_peercred = getattr(socket, "LOCAL_PEERCRED", None)
+    if local_peercred is not None:
+        raw = conn.getsockopt(0, local_peercred, 12)
+        _version, uid, _groups = struct.unpack("@iIh", raw[:10])
+        return int(uid)
+    so_peercred = getattr(socket, "SO_PEERCRED", None)
+    if so_peercred is not None:
+        raw = conn.getsockopt(socket.SOL_SOCKET, so_peercred, 12)
+        _pid, uid, _gid = struct.unpack("3i", raw)
+        return int(uid)
+    raise PermissionError("peer uid authentication is unavailable on this platform")
+
 def _serve(conn: socket.socket) -> None:
     try:
+        peer_uid = _peer_uid(conn)
+        if peer_uid != os.getuid():
+            raise PermissionError(
+                f"peer uid {peer_uid} does not match server uid {os.getuid()}"
+            )
         data = b""
         conn.settimeout(10)
         while b"\n" not in data:
@@ -523,9 +569,8 @@ def _serve(conn: socket.socket) -> None:
             asker = _sanitize_name(req.get("from_name") or "unknown")
             text = (
                 f"{text}\n"
-                f"[The sender expects a reply. Use intercom(action=\"send\", "
-                f"to=\"{asker}\", message=\"...\") — your reply is routed "
-                f"back to their pending ask automatically.]"
+                f"[The sender expects a reply. Use intercom(action=\"reply\", "
+                f"to=\"{asker}\", request_id=\"{rid}\", message=\"...\").]"
             )
         status = _deliver_local(text)
         resp = {"ok": status not in ("rejected_pending_cap",), "status": status}
@@ -548,7 +593,11 @@ def start(name: str = "", session_id: str = "") -> None:
 
     reg = _registry_dir()
     reg.mkdir(parents=True, exist_ok=True)
-    sid = session_id or f"{os.getpid():d}-{int(time.time())}"
+    sid = (
+        session_id
+        or os.environ.get("HERMES_SESSION_ID", "").strip()
+        or f"{os.getpid():d}-{int(time.time())}"
+    )
     sock_path = str(reg / f"{sid}.sock")
     try:
         os.unlink(sock_path)

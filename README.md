@@ -64,7 +64,7 @@ plugins:
 
 ## Safety
 
-- Socket is `0600`, same-UID only — no TCP listener, ever
+- Socket is `0600`, and the receiver verifies the peer UID — no TCP listener, ever
 - Inbound messages are inert text; the frame identifies the sending session so the model never mistakes it for user instructions
 - Per-peer rate limit (6/min), duplicate suppression (120 s window), pending queue cap with disk spill (survives receiver crashes)
 - Sessions publish their busy/idle state (`turn_active`) to the registry so senders can pick idle peers
@@ -77,7 +77,7 @@ Findings from building this against the real Hermes codebase are in [`docs/findi
 
 Implemented in v2/v3:
 
-- ✅ Blocking `ask`/`reply` (request-response with timeout)
+- ✅ Blocking `ask`/`reply` (request-response with explicit request IDs and timeout)
 - ✅ Delivery receipts (`delivered` / `held` / `refused`)
 - ✅ Busy/idle state published to the registry and surfaced via `action="list"`
 - ✅ Persistent inbox spool (messages survive receiver crashes/restarts)
