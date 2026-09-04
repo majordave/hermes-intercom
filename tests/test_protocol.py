@@ -176,19 +176,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertIn("uid", response["error"])
 
-    def test_restart_recovers_spool_for_same_hermes_session(self):
+    def test_registry_identity_ignores_inherited_session_id(self):
         with mock.patch.dict(
             self.plugin.inbox.os.environ,
-            {"HERMES_SESSION_ID": "durable-session-123"},
+            {"HERMES_SESSION_ID": "stale-parent-session"},
         ):
             self.plugin.inbox.start(name="lab")
-            self.assertEqual(
-                self.plugin.inbox.self_meta()["session_id"],
-                "durable-session-123",
-            )
-            self.plugin.inbox._spool_append("survives restart")
-            self.plugin.inbox.stop()
-            self.plugin.inbox.start(name="lab")
+
+        self.assertNotEqual(
+            self.plugin.inbox.self_meta()["session_id"],
+            "stale-parent-session",
+        )
+
+    def test_spool_survives_inbox_restart_for_explicit_endpoint(self):
+        self.plugin.inbox.start(name="lab", session_id="endpoint-123")
+        self.plugin.inbox._spool_append("survives restart")
+        self.plugin.inbox.stop()
+        self.plugin.inbox.start(name="lab", session_id="endpoint-123")
 
         self.assertEqual(self.plugin.inbox.take_pending(), ["survives restart"])
 

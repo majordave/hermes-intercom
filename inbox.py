@@ -593,11 +593,7 @@ def start(name: str = "", session_id: str = "") -> None:
 
     reg = _registry_dir()
     reg.mkdir(parents=True, exist_ok=True)
-    sid = (
-        session_id
-        or os.environ.get("HERMES_SESSION_ID", "").strip()
-        or f"{os.getpid():d}-{int(time.time())}"
-    )
+    sid = session_id or f"{os.getpid():d}-{int(time.time())}"
     sock_path = str(reg / f"{sid}.sock")
     try:
         os.unlink(sock_path)
